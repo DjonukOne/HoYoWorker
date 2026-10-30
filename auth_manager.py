@@ -22,6 +22,7 @@ import random
 import string
 import time
 import typing
+import uuid
 
 import aiohttp
 import genshin
@@ -38,6 +39,19 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
+
+# Cookies с отпечатком устройства: HoYoLAB считает их частью "устройства",
+# поэтому сохраняем и по возможности переиспользуем.
+DEVICE_COOKIE_KEYS = ("_MHYUUID", "DEVICEFP", "DEVICEFP_SEED_ID", "DEVICEFP_SEED_TIME")
+
+# Полный вход по паролю перевыпускает cookie-токен (нужен для промокодов),
+# но каждое такое действие - повод для проверки "я не робот". Поэтому делаем
+# его не чаще раза в двое суток и только когда сессия правда требует обновления.
+RELOGIN_INTERVAL = 2 * 24 * 3600
+
+# После запроса капчи не дёргаем авто-вход некоторое время, чтобы не злить
+# защиту HoYoLAB и не показывать ошибку при каждом запуске.
+CAPTCHA_COOLDOWN = 6 * 3600
 
 # Cookies, которые можно отправлять в обычные запросы к API.
 SESSION_COOKIE_KEYS = (
@@ -77,9 +91,7 @@ def has_password() -> bool:
 
 def can_auto_refresh() -> bool:
     """Есть ли чем получить новый токен без участия пользователя."""
-    return has_stoken() or has_password() or bool(
-        config.COOKIES.get("cookie_token_v2") or config.COOKIES.get("cookie_token")
-    )
+    return has_stoken() or has_password() or has_cookie_token()
 
 
 def last_refresh_time() -> typing.Optional[int]:
@@ -185,7 +197,65 @@ def persist_cookie_update(cookies: typing.Mapping[str, typing.Any]) -> None:
 def save_login_cookies(cookies: typing.Mapping[str, typing.Any]) -> None:
     """Сохранить cookies, полученные во встроенном браузере."""
     _replace(dict(cookies))
-    config.set_credentials(last_login=int(time.time()))
+    config.set_credentials(last_login=int(time.time()), last_login_at=int(time.time()))
+
+
+# --------------------------------------------------------------------------- #
+# Устройство и защита от капчи
+# --------------------------------------------------------------------------- #
+
+def _device_id() -> str:
+    """Постоянный идентификатор устройства.
+
+    genshin по умолчанию придумывает новый device_id на каждый вход, и для
+    HoYoLAB это каждый раз "новое устройство" - отсюда проверка "я не робот".
+    Поэтому генерируем один раз и переиспользуем.
+    """
+    value = config.CREDENTIALS.get("device_id")
+    if not value:
+        value = str(uuid.uuid4())
+        config.set_credentials(device_id=value)
+    return str(value)
+
+
+def _login_cookies() -> dict[str, str]:
+    """Cookies, которые стоит отправить вместе с запросом входа."""
+    jar = session_cookies()
+    device = config.CREDENTIALS.get("device_cookies") or {}
+    if isinstance(device, dict):
+        jar.update({key: str(value) for key, value in device.items() if value})
+    return jar
+
+
+def captcha_blocked() -> bool:
+    """Недавно HoYoLAB просил капчу - авто-вход временно не трогаем."""
+    until = config.CREDENTIALS.get("captcha_until")
+    return isinstance(until, int) and until > time.time()
+
+
+def _set_captcha_block(seconds: int = CAPTCHA_COOLDOWN) -> None:
+    config.set_credentials(captcha_until=int(time.time() + seconds))
+
+
+def _relogin_due() -> bool:
+    """Пора ли перевыпустить сессию по паролю (cookie-токен живёт пару дней)."""
+    last = config.CREDENTIALS.get("last_login_at")
+    if not isinstance(last, int):
+        return True
+    return (time.time() - last) >= RELOGIN_INTERVAL
+
+
+def has_cookie_token() -> bool:
+    return bool(config.COOKIES.get("cookie_token_v2") or config.COOKIES.get("cookie_token"))
+
+
+def _mark_refreshed(source: str) -> None:
+    config.set_credentials(
+        last_refresh=int(time.time()),
+        refresh_source=source,
+        refresh_ok=True,
+        last_refresh_note=None,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -279,9 +349,18 @@ async def _renew_cookie_token(log) -> bool:
         log(f"⚠️ Не удалось продлить cookie-токен: {error}")
         return False
 
+    retcode = data.get("retcode")
+    if retcode not in (0, None):
+        log(
+            f"⚠️ Продление cookie-токена недоступно "
+            f"(код {retcode}: {data.get('message') or 'без описания'})."
+        )
+        return False
+
     payload = data.get("data") or {}
     info = payload.get("cookie_info") or {}
     if not info:
+        log("⚠️ HoYoLAB не вернул cookie-токен при продлении.")
         return False
 
     fresh = {}
@@ -320,12 +399,21 @@ async def login_with_password(
     if not account or not password:
         raise AuthError("Введите логин и пароль.")
 
-    client = genshin.Client()
+    device_id = _device_id()
+    client = genshin.Client(_login_cookies())
+    try:
+        # Подменяем генератор device_id: вход должен выглядеть как тот же
+        # компьютер, иначе HoYoLAB каждый раз просит капчу.
+        client.generate_web_device_id = lambda: device_id
+    except Exception:
+        pass
+
     try:
         result = await client.login_with_password(
             account, password, geetest_solver=_captcha_solver
         )
     except CaptchaRequired:
+        _set_captcha_block()
         raise
     except genshin.errors.AccountLoginFail as error:
         raise AuthError("Неверный логин или пароль.") from error
@@ -341,8 +429,21 @@ async def login_with_password(
     except Exception as error:
         raise AuthError(f"Не удалось войти: {error}") from error
 
-    cookies = result.to_dict() if hasattr(result, "to_dict") else dict(result)
+    # Все cookies, которые HoYoLAB выставил при входе (включая отпечаток
+    # устройства и, если повезёт, stoken).
+    manager_cookies = getattr(client.cookie_manager, "cookies", None)
+    if manager_cookies:
+        cookies = dict(manager_cookies)
+    elif hasattr(result, "to_dict"):
+        cookies = result.to_dict()
+    else:
+        cookies = dict(result)
+
     _replace(cookies)
+
+    fingerprint = {key: value for key, value in cookies.items() if key in DEVICE_COOKIE_KEYS}
+    if fingerprint:
+        config.set_credentials(device_cookies=fingerprint)
 
     if not config.COOKIES.get("ltoken_v2") and not config.COOKIES.get("cookie_token_v2"):
         raise AuthError("HoYoLAB не выдал токены. Попробуйте войти через браузер.")
@@ -350,9 +451,10 @@ async def login_with_password(
     config.set_credentials(
         account=account,
         password=password if remember else None,
-        last_refresh=int(time.time()),
-        refresh_source="password",
+        last_login_at=int(time.time()),
+        captcha_until=None,
     )
+    _mark_refreshed("password")
     log("✅ Вход выполнен, токены сохранены в зашифрованном виде.")
     return True
 
@@ -363,8 +465,19 @@ async def _login_with_stored_password(log) -> bool:
     if not account or not password:
         return False
 
+    if captcha_blocked():
+        log("ℹ️ Авто-вход по паролю пропущен: HoYoLAB недавно просил капчу.")
+        return False
+
     try:
         return await login_with_password(account, password, remember=True, log=log)
+    except CaptchaRequired:
+        log(
+            "ℹ️ HoYoLAB запросил капчу при авто-входе. "
+            f"Авто-вход приостановлен на {CAPTCHA_COOLDOWN // 3600} ч, "
+            "текущая сессия продолжает работать."
+        )
+        return False
     except AuthError as error:
         log(f"⚠️ Авто-вход не удался: {error}")
         return False
@@ -393,58 +506,94 @@ async def _verify_session() -> typing.Optional[bool]:
 # --------------------------------------------------------------------------- #
 
 async def ensure_session(log=print) -> bool:
-    """Запросить свежий токен. Вызывается при каждом запуске приложения."""
+    """Запросить свежий токен. Вызывается при каждом запуске приложения.
+
+    Порядок:
+    1. дешёвые способы - stoken и продление cookie-токена (без капчи);
+    2. полный вход по паролю - только если он действительно нужен
+       (сессия мертва или cookie-токен давно не обновлялся) и HoYoLAB
+       не просил капчу в последние часы;
+    3. если сессия ещё рабочая - спокойно продолжаем с ней.
+    """
     if not config.COOKIES and not has_stoken() and not has_password():
         return False
 
     log("🔐 Запрашиваем свежий токен HoYoLAB...")
 
-    attempts: list[tuple[str, typing.Any, str]] = []
+    note = ""
 
+    # Проверку сессии делаем максимум один раз за запуск.
+    unchecked = object()
+    verified: typing.Any = unchecked
+
+    async def verify() -> typing.Optional[bool]:
+        nonlocal verified
+        if verified is unchecked:
+            verified = await _verify_session()
+        return verified
+
+    def invalidate() -> None:
+        nonlocal verified
+        verified = unchecked
+
+    # 1. Обновление по stoken - самый надёжный способ без капчи.
     if has_stoken():
-        attempts.append(("stoken", _refresh_with_stoken, "по stoken"))
-    if config.COOKIES.get("cookie_token_v2") or config.COOKIES.get("cookie_token"):
-        attempts.append(("cookie", _renew_cookie_token, "продлением cookie-токена"))
+        if await _refresh_with_stoken(log):
+            invalidate()
+            if await verify() is not False:
+                _mark_refreshed("stoken")
+                log("✅ Токен обновлён по stoken.")
+                return True
+            note = "токен, полученный по stoken, не подошёл"
+        else:
+            note = "stoken не принят HoYoLAB"
+
+    # 2. Продление cookie-токена (именно он нужен для промокодов).
+    if has_cookie_token():
+        if await _renew_cookie_token(log):
+            invalidate()
+            if await verify() is not False:
+                _mark_refreshed("cookie")
+                log("✅ Токен обновлён продлением cookie-токена.")
+                return True
+            note = note or "продлённый cookie-токен не подошёл"
+        else:
+            note = note or "продление cookie-токена недоступно"
+
+    # 3. Полный вход по паролю.
     if has_password():
-        attempts.append(("password", _login_with_stored_password, "по сохранённому паролю"))
+        if captcha_blocked():
+            note = "HoYoLAB недавно требовал капчу для авто-входа"
+        else:
+            needs_login = (await verify() is False) or _relogin_due()
 
-    if not attempts:
+            if needs_login:
+                if await _login_with_stored_password(log):
+                    invalidate()
+                    if await verify() is not False:
+                        _mark_refreshed("password")
+                        log("✅ Сессия перевыпущена по паролю.")
+                        return True
+                    note = "вход по паролю не дал рабочую сессию"
+                elif captcha_blocked():
+                    note = "HoYoLAB требует капчу для авто-входа"
+                else:
+                    note = note or "авто-вход по паролю не удался"
+
+    # 4. Может, текущий токен ещё жив - тогда просто работаем дальше.
+    if await verify() is not False:
+        note = note or "новый токен сейчас получить нельзя"
+        config.set_credentials(refresh_ok=False, last_refresh_note=note)
         log(
-            "⚠️ Нет данных для автоматического обновления токена. "
-            "Включите «Авто-вход по паролю», чтобы сессия продлевалась сама."
-        )
-        config.set_credentials(refresh_ok=False)
-        # Токен обновить нечем, но сохранённая сессия может быть ещё живой.
-        return await _verify_session() is not False
-
-    for source, refresh, title in attempts:
-        if not await refresh(log):
-            continue
-
-        status = await _verify_session()
-        if status is False:
-            log(f"⚠️ Токен, полученный {title}, не подошёл. Пробуем другой способ.")
-            continue
-
-        config.set_credentials(
-            last_refresh=int(time.time()),
-            refresh_source=source,
-            refresh_ok=True,
-        )
-        log(f"✅ Токен обновлён {title}.")
-        return True
-
-    config.set_credentials(refresh_ok=False)
-
-    if await _verify_session() is not False:
-        log(
-            "<span style='color:#ffcc66;'>⚠️ Обновить токен не удалось, но текущая сессия "
-            "пока работает. Скоро потребуется повторный вход.</span>"
+            f"<span style='color:#ffcc66;'>ℹ️ {note.capitalize()}. "
+            "Используем текущую сессию - если промокоды перестанут приниматься, "
+            "войдите в аккаунт заново.</span>"
         )
         return True
 
+    config.set_credentials(refresh_ok=False, last_refresh_note="сессия недействительна")
     log(
-        "<span style='color:#ff5555;'>🛑 Не удалось обновить токен. "
-        "Скорее всего, сессия отозвана - войдите в аккаунт заново.</span>"
+        "<span style='color:#ff5555;'>🛑 Сессия HoYoLAB недействительна. "
+        "Войдите в аккаунт заново.</span>"
     )
     return False

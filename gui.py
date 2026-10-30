@@ -391,9 +391,11 @@ class MainWindow(QMainWindow):
             return
 
         if config.CREDENTIALS.get("refresh_ok") is False:
+            note = config.CREDENTIALS.get("last_refresh_note")
+            reason = f"{note}." if note else "новый токен сейчас получить нельзя."
             self.auth_hint.setText(
-                "⚠️ Последняя попытка обновить токен не удалась. Если задачи начнут падать "
-                "с ошибкой авторизации — войдите в аккаунт заново."
+                f"ℹ️ Авто-обновление: {reason} Используется текущая сессия — если промокоды "
+                "перестанут приниматься, войдите в аккаунт заново."
             )
         elif auth_manager.has_password():
             self.auth_hint.setText(
