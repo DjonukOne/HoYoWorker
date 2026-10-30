@@ -1,10 +1,14 @@
-# Авторизация и работа с HoYoLAB
-genshin>=1.7
-aiohttp>=3.9
+# ВАЖНО: PyQt6 и PyQt6-WebEngine должны быть одной минорной версии (одна библиотека Qt).
+# PyQt6-WebEngine отстаёт от PyQt6 (сейчас 6.11 против 6.12), поэтому без пина
+# pip ставит две разные Qt в один процесс и приложение падает с
+# "DLL load failed while importing QtWebEngineWidgets: Не найдена указанная процедура".
+# Эти две версии проверены на совместимость (обе собираются с Qt 6.11.x).
+PyQt6==6.11.0
+PyQt6-WebEngine==6.11.0
 
-# Интерфейс
-PyQt6>=6.6
-PyQt6-WebEngine>=6.6
+# Авторизация и работа с HoYoLAB
+genshin>=1.7,<2
+aiohttp>=3.9
 
 # Шифрование локального хранилища (Fernet + защита ключа через Windows DPAPI)
 cryptography>=41

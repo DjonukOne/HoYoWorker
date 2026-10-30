@@ -71,15 +71,42 @@ Windows DPAPI — файлы невозможно расшифровать на 
 **Питон:** `Python 3.10+`
 **Библиотеки:** `genshin` `aiohttp` `PyQt6` `PyQt6-WebEngine` `cryptography`
 
-Установка зависимостей:
+Установка зависимостей (версии PyQt6 в `requirements.txt` зафиксированы — см. раздел «Решение проблем»):
 ```
 pip install -r requirements.txt
+python check_deps.py
 ```
 
-**Сборка через pyinstaller:**
+**Сборка exe:**
 ```
-pyinstaller --noconfirm --onefile --windowed --icon "icon.ico" --add-data "icon.png;." main.py
+build.bat
 ```
+Скрипт сначала проверяет зависимости, затем собирает `dist\HoYoWorker.exe`. Вручную команда выглядит так:
+```
+pyinstaller --noconfirm --onefile --windowed --icon "icon.ico" --add-data "icon.png;." ^
+    --hidden-import PyQt6.QtWebEngineWidgets --hidden-import PyQt6.QtWebEngineCore main.py
+```
+
+---
+
+## 🧩 Решение проблем
+
+### `ImportError: DLL load failed while importing QtWebEngineWidgets: Не найдена указанная процедура`
+
+Так выглядит конфликт версий: `PyQt6` и `PyQt6-WebEngine` собраны с разными библиотеками Qt
+(WebEngine всегда отстаёт от PyQt6 на одну минорную версию). В одном процессе оказываются
+две Qt — и Windows не может загрузить DLL.
+
+Лечится переустановкой совместимой пары (в том окружении, из которого вы запускаете/собираете программу):
+```
+pip uninstall -y PyQt6 PyQt6-Qt6 PyQt6-WebEngine PyQt6-WebEngine-Qt6 PyQt6-sip
+pip install -r requirements.txt
+python check_deps.py
+```
+После этого удалите папки `build` и `dist` и пересоберите exe через `build.bat`.
+
+Если пересборка не нужна — приложение всё равно запустится: встроенный браузер будет
+помечен как недоступный, а войти можно кнопкой **«Авто-вход по паролю»**.
 
 ---
 

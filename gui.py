@@ -9,8 +9,18 @@ from PyQt6.QtWidgets import (QMainWindow, QPushButton, QVBoxLayout, QWidget,
                              QGridLayout, QDialog, QLineEdit, QCheckBox, QFormLayout, QDialogButtonBox, QMessageBox)
 from PyQt6.QtGui import QIcon, QAction, QDesktopServices
 from PyQt6.QtCore import Qt, QUrl, QTimer, pyqtSignal, QTime
-from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage
+
+# Встроенный браузер (QtWebEngine). Если PyQt6 и PyQt6-WebEngine собраны
+# с разными версиями Qt, импорт падает с "DLL load failed".
+# Это не должно ронять всё приложение: остальные функции (в том числе вход
+# по логину и паролю) работают и без встроенного браузера.
+try:
+    from PyQt6.QtWebEngineWidgets import QWebEngineView
+    from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage
+    WEBENGINE_ERROR = None
+except Exception as _webengine_error:  # noqa: BLE001
+    QWebEngineView = QWebEngineProfile = QWebEnginePage = object  # type: ignore[misc,assignment]
+    WEBENGINE_ERROR = _webengine_error
 
 import auth_manager
 import config
@@ -292,6 +302,13 @@ class MainWindow(QMainWindow):
         self.daily_ran_at = None
         self.promo_ran_at = None
 
+        if WEBENGINE_ERROR is not None:
+            self.update_log(
+                "<span style='color:#ffcc66;'>⚠️ Встроенный браузер не загрузился "
+                f"({WEBENGINE_ERROR}).</span> Используйте «Авто-вход по паролю» "
+                "или переустановите зависимости: pip install -r requirements.txt"
+            )
+
         self.refresh_auth_ui()
         self.start_session_refresh()
 
@@ -316,19 +333,31 @@ class MainWindow(QMainWindow):
         if config.COOKIES:
             self.status_label.setText("Статус: 🟢 Авторизован")
             self.btn_auth.setText("Выйти из аккаунта")
+            self.btn_auth.setEnabled(True)
             self.btn_auth.setStyleSheet("color: #ff5555; border-color: #ff5555;")
             self.accounts_label.setText("Обновляем токен...")
             self.btn_password.setText("Сменить пароль для авто-входа" if auth_manager.has_password() else "Авто-вход по паролю")
             self.update_auth_hint()
         else:
             self.status_label.setText("Статус: 🔴 Не авторизован")
-            self.btn_auth.setText("Войти через HoYoLAB")
-            self.btn_auth.setStyleSheet("") 
+            self.btn_auth.setStyleSheet("")
             self.accounts_label.setText("Войдите, чтобы увидеть список игр.")
-            self.auth_hint.setText(
-                "Вход через браузер сохранит токены. Чтобы приложение само продлевало "
-                "сессию, включите «Авто-вход по паролю»."
-            )
+
+            if WEBENGINE_ERROR is not None:
+                self.btn_auth.setText("Встроенный браузер недоступен")
+                self.btn_auth.setEnabled(False)
+                self.auth_hint.setText(
+                    "⚠️ QtWebEngine не загрузился (обычно это конфликт версий PyQt6 "
+                    "и PyQt6-WebEngine). Войдите кнопкой «Авто-вход по паролю» — "
+                    "она работает без браузера."
+                )
+            else:
+                self.btn_auth.setText("Войти через HoYoLAB")
+                self.btn_auth.setEnabled(True)
+                self.auth_hint.setText(
+                    "Вход через браузер сохранит токены. Чтобы приложение само продлевало "
+                    "сессию, включите «Авто-вход по паролю»."
+                )
 
     def update_auth_hint(self):
         if not config.COOKIES:
@@ -404,10 +433,27 @@ class MainWindow(QMainWindow):
             config.clear_session()
             self.refresh_auth_ui()
             self.update_log("Выполнен выход из аккаунта, сохранённые данные удалены.")
+        elif WEBENGINE_ERROR is not None:
+            self.show_webengine_error()
         else:
             self.login_window = LoginWindow()
             self.login_window.cookies_ready.connect(self.on_cookies_ready)
             self.login_window.show()
+
+    def show_webengine_error(self):
+        QMessageBox.critical(
+            self,
+            "Встроенный браузер недоступен",
+            "Не удалось загрузить QtWebEngine, поэтому окно входа в HoYoLAB не откроется.\n\n"
+            "Обычно причина в том, что PyQt6 и PyQt6-WebEngine собраны с разными версиями "
+            "Qt (библиотека QtWebEngine отстаёт от PyQt6).\n\n"
+            "Как исправить (в окружении, из которого собирается программа):\n"
+            "    pip uninstall -y PyQt6 PyQt6-Qt6 PyQt6-WebEngine PyQt6-WebEngine-Qt6\n"
+            "    pip install -r requirements.txt\n"
+            "затем пересоберите exe.\n\n"
+            "Вход по логину и паролю (кнопка «Авто-вход по паролю») работает и без браузера.\n\n"
+            f"Техническая информация: {WEBENGINE_ERROR}"
+        )
 
     def on_cookies_ready(self):
         self.update_log("<span style='color:#55ff55;'>✅ Авторизация успешна!</span>")
