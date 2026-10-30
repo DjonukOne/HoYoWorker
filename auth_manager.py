@@ -331,6 +331,13 @@ async def login_with_password(
         raise AuthError("Неверный логин или пароль.") from error
     except genshin.errors.AccountDoesNotExist as error:
         raise AuthError("Аккаунт с таким логином не найден.") from error
+    except ModuleNotFoundError as error:
+        # Например "No module named 'rsa'" - не хватает зависимости для
+        # шифрования пароля. Подсказываем, что делать.
+        raise AuthError(
+            f"Не хватает модуля «{error.name}». Установите зависимости командой "
+            "pip install -r requirements.txt"
+        ) from error
     except Exception as error:
         raise AuthError(f"Не удалось войти: {error}") from error
 

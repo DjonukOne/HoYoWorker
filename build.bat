@@ -14,6 +14,7 @@ if exist dist rmdir /s /q dist
 pyinstaller --noconfirm --onefile --windowed --icon "icon.ico" --add-data "icon.png;." ^
     --hidden-import PyQt6.QtWebEngineWidgets ^
     --hidden-import PyQt6.QtWebEngineCore ^
+    --hidden-import rsa ^
     main.py
 if errorlevel 1 goto :error
 

@@ -28,7 +28,7 @@ def _minor(value):
 
 def main() -> int:
     packages = ("PyQt6", "PyQt6-Qt6", "PyQt6-WebEngine", "PyQt6-WebEngine-Qt6",
-                "genshin", "aiohttp", "cryptography")
+                "genshin", "aiohttp", "cryptography", "rsa")
 
     print("Установленные версии:")
     for name in packages:
@@ -48,7 +48,7 @@ def main() -> int:
             "Встроенный браузер работать не будет."
         )
 
-    for name in ("genshin", "aiohttp", "cryptography"):
+    for name in ("genshin", "aiohttp", "cryptography", "rsa"):
         if not _version(name):
             problems.append(f"{name} не установлен")
 

@@ -9,6 +9,9 @@ PyQt6-WebEngine==6.11.0
 # Авторизация и работа с HoYoLAB
 genshin>=1.7,<2
 aiohttp>=3.9
+# Нужен genshin для шифрования логина/пароля (extra "auth" у библиотеки).
+# Без него вход по паролю падает с "No module named 'rsa'".
+rsa>=4.9
 
 # Шифрование локального хранилища (Fernet + защита ключа через Windows DPAPI)
 cryptography>=41

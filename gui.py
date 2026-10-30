@@ -56,6 +56,7 @@ QTimeEdit {
     background-color: #1e1e1e; color: #d4af37; border: 1px solid #d4af37;
     padding: 4px; border-radius: 4px; width: 60px;
 }
+QTimeEdit:disabled { color: #6b6b6b; border-color: #444444; }
 QLineEdit {
     background-color: #1e1e1e; color: #ececec; border: 1px solid #d4af37;
     padding: 6px; border-radius: 4px;
@@ -196,7 +197,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("HoYoWorker")
-        self.resize(500, 620) 
+        self.resize(560, 620) 
         self.setWindowIcon(QIcon(ICON_PATH))
         self.setStyleSheet(HSR_STYLE)
 
@@ -247,24 +248,41 @@ class MainWindow(QMainWindow):
         layout.addLayout(btns_layout)
 
         timers_layout = QGridLayout()
-        timers_layout.addWidget(QLabel("Ежедневные отметки в:"), 0, 0)
+
+        self.chk_daily = QCheckBox("Авто-отметки")
+        self.chk_daily.setToolTip("Автоматически собирать ежедневные отметки по расписанию")
+        self.chk_daily.setChecked(bool(config.SETTINGS.get("auto_daily", True)))
+        timers_layout.addWidget(self.chk_daily, 0, 0)
+
+        timers_layout.addWidget(QLabel("в"), 0, 1)
         self.time_daily = QTimeEdit()
         self.time_daily.setDisplayFormat("HH:mm")
-        
-        t_daily = config.SETTINGS.get("time_daily", "08:00")
-        self.time_daily.setTime(QTime.fromString(t_daily, "HH:mm")) 
-        self.time_daily.timeChanged.connect(self.save_timers) 
-        timers_layout.addWidget(self.time_daily, 0, 1)
 
-        timers_layout.addWidget(QLabel("Проверка промокодов в:"), 0, 2)
+        t_daily = config.SETTINGS.get("time_daily", "08:00")
+        self.time_daily.setTime(QTime.fromString(t_daily, "HH:mm"))
+        self.time_daily.timeChanged.connect(self.save_timers)
+        timers_layout.addWidget(self.time_daily, 0, 2)
+
+        self.chk_promo = QCheckBox("Авто-промокоды")
+        self.chk_promo.setToolTip("Автоматически парсить и вводить промокоды по расписанию")
+        self.chk_promo.setChecked(bool(config.SETTINGS.get("auto_promo", True)))
+        timers_layout.addWidget(self.chk_promo, 0, 3)
+
+        timers_layout.addWidget(QLabel("в"), 0, 4)
         self.time_promo = QTimeEdit()
         self.time_promo.setDisplayFormat("HH:mm")
-        
+
         t_promo = config.SETTINGS.get("time_promo", "12:00")
-        self.time_promo.setTime(QTime.fromString(t_promo, "HH:mm")) 
-        self.time_promo.timeChanged.connect(self.save_timers) 
-        timers_layout.addWidget(self.time_promo, 0, 3)
-        
+        self.time_promo.setTime(QTime.fromString(t_promo, "HH:mm"))
+        self.time_promo.timeChanged.connect(self.save_timers)
+        timers_layout.addWidget(self.time_promo, 0, 5)
+
+        # Галочки независимы: можно оставить только отметки или только промокоды.
+        self.chk_daily.toggled.connect(self.on_schedule_toggled)
+        self.chk_promo.toggled.connect(self.on_schedule_toggled)
+        self.time_daily.setEnabled(self.chk_daily.isChecked())
+        self.time_promo.setEnabled(self.chk_promo.isChecked())
+
         layout.addLayout(timers_layout)
 
         self.log_text = QTextEdit()
@@ -319,8 +337,16 @@ class MainWindow(QMainWindow):
     def save_timers(self):
         config.update_settings({
             "time_daily": self.time_daily.time().toString("HH:mm"),
-            "time_promo": self.time_promo.time().toString("HH:mm")
+            "time_promo": self.time_promo.time().toString("HH:mm"),
+            "auto_daily": self.chk_daily.isChecked(),
+            "auto_promo": self.chk_promo.isChecked(),
         })
+
+    def on_schedule_toggled(self):
+        """Галочки включают/выключают только своё расписание."""
+        self.time_daily.setEnabled(self.chk_daily.isChecked())
+        self.time_promo.setEnabled(self.chk_promo.isChecked())
+        self.save_timers()
 
     def start_session_refresh(self):
         """При каждом запуске просим у HoYoLAB новый токен."""
@@ -534,14 +560,14 @@ class MainWindow(QMainWindow):
         current_time = time.strftime("%H:%M")
         t_daily = self.time_daily.time().toString("HH:mm")
         t_promo = self.time_promo.time().toString("HH:mm")
-        
-        if current_time == t_daily and self.daily_ran_at != current_time:
-            self.daily_ran_at = current_time 
+
+        if self.chk_daily.isChecked() and current_time == t_daily and self.daily_ran_at != current_time:
+            self.daily_ran_at = current_time
             self.run_manual_daily()
-            
-        if current_time == t_promo and self.promo_ran_at != current_time:
-            self.promo_ran_at = current_time 
-            self.run_auto_promo() 
+
+        if self.chk_promo.isChecked() and current_time == t_promo and self.promo_ran_at != current_time:
+            self.promo_ran_at = current_time
+            self.run_auto_promo()
 
     def closeEvent(self, event):
         event.ignore()
