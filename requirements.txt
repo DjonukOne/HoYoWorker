@@ -1,0 +1,10 @@
+# Авторизация и работа с HoYoLAB
+genshin>=1.7
+aiohttp>=3.9
+
+# Интерфейс
+PyQt6>=6.6
+PyQt6-WebEngine>=6.6
+
+# Шифрование локального хранилища (Fernet + защита ключа через Windows DPAPI)
+cryptography>=41
