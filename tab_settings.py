@@ -9,6 +9,7 @@ from PyQt6.QtCore import Qt, QTime
 
 import config
 from styles import DEFAULT_HSR_STYLE
+from settings_games_ui import GamesManagerWidget
 
 class SettingsTab(QWidget):
     def __init__(self, main_win):
@@ -45,9 +46,7 @@ class SettingsTab(QWidget):
         self.layout.addLayout(timers_layout)
 
         # 2. Таблица аккаунтов
-        acc_title = QLabel("<b>👥 Управление аккаунтами и авто-перелогином:</b>")
-        self.layout.addWidget(acc_title)
-
+        self.layout.addWidget(QLabel("<b>👥 Управление аккаунтами и авто-перелогином:</b>"))
         self.acc_grid = QGridLayout()
         self.acc_grid.setSpacing(8)
         self.acc_grid.setColumnStretch(0, 2)
@@ -55,7 +54,12 @@ class SettingsTab(QWidget):
         self.acc_grid.setColumnStretch(2, 2)
         self.layout.addLayout(self.acc_grid)
 
-        # 3. Дополнительные опции
+        # 3. Модульный менеджер игр
+        self.games_widget = GamesManagerWidget(self.main_win)
+        self.games_widget.games_changed.connect(self.refresh_games_combo)
+        self.layout.addWidget(self.games_widget)
+
+        # 4. Дополнительные опции
         self.layout.addWidget(QLabel("<b>⚙️ Поведение и система:</b>"))
         
         self.chk_relogin = QCheckBox("🔄 Всегда открывать авто-перелогин перед вводом промокодов")
@@ -73,14 +77,12 @@ class SettingsTab(QWidget):
         self.chk_autorun.toggled.connect(self.toggle_autorun)
         self.layout.addWidget(self.chk_autorun)
 
-        # 4. Ручной ввод промокода (с выбором игры!)
+        # 5. Ручной ввод промокодов со стрима
         self.layout.addWidget(QLabel("<b>🎁 Быстрый ввод промокодов со стрима (на все аккаунты сразу):</b>"))
         manual_layout = QHBoxLayout()
         
         self.combo_manual_game = QComboBox()
-        self.combo_manual_game.addItem("Genshin Impact", "GENSHIN")
-        self.combo_manual_game.addItem("Honkai: Star Rail", "STARRAIL")
-        self.combo_manual_game.addItem("Zenless Zone Zero", "ZZZ")
+        self.refresh_games_combo()
         manual_layout.addWidget(self.combo_manual_game)
 
         self.input_manual_code = QLineEdit()
@@ -92,7 +94,7 @@ class SettingsTab(QWidget):
         manual_layout.addWidget(btn_manual_code)
         self.layout.addLayout(manual_layout)
 
-        # 5. Кастомизация CSS
+        # 6. Кастомизация CSS
         self.layout.addWidget(QLabel("<b>🎨 Оформление (CSS темы):</b>"))
         css_layout = QHBoxLayout()
         btn_export_css = QPushButton("📤 Экспорт CSS")
@@ -112,6 +114,17 @@ class SettingsTab(QWidget):
 
         self.rebuild_accounts_grid()
 
+    def refresh_games_combo(self):
+        current_data = self.combo_manual_game.currentData()
+        self.combo_manual_game.clear()
+        for g_key, g_data in config.GAMES.items():
+            short = g_data.get("short_name", g_key)
+            self.combo_manual_game.addItem(f"{short} ({g_key})", g_key)
+        if current_data:
+            idx = self.combo_manual_game.findData(current_data)
+            if idx >= 0:
+                self.combo_manual_game.setCurrentIndex(idx)
+
     def rebuild_accounts_grid(self):
         while self.acc_grid.count():
             item = self.acc_grid.takeAt(0)
@@ -128,17 +141,14 @@ class SettingsTab(QWidget):
 
         for row, (acc_id, data) in enumerate(config.ACCOUNTS.items(), start=1):
             name_edit = QLineEdit(data.get("name", ""))
-            name_edit.setPlaceholderText("Имя аккаунта")
             name_edit.textChanged.connect(lambda val, aid=acc_id: self.update_acc_field(aid, "name", val))
             self.acc_grid.addWidget(name_edit, row, 0)
 
             login_edit = QLineEdit(data.get("login", ""))
-            login_edit.setPlaceholderText("Email / Логин")
             login_edit.textChanged.connect(lambda val, aid=acc_id: self.update_acc_field(aid, "login", val))
             self.acc_grid.addWidget(login_edit, row, 1)
 
             pass_edit = QLineEdit(data.get("password", ""))
-            pass_edit.setPlaceholderText("Пароль")
             pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
             pass_edit.textChanged.connect(lambda val, aid=acc_id: self.update_acc_field(aid, "password", val))
             self.acc_grid.addWidget(pass_edit, row, 2)
@@ -191,16 +201,14 @@ class SettingsTab(QWidget):
     def export_css(self):
         path, _ = QFileDialog.getSaveFileName(self, "Экспорт темы CSS", "hoyo_theme.css", "CSS Files (*.css)")
         if path:
-            current_css = config.SETTINGS.get("custom_css", DEFAULT_HSR_STYLE)
             with open(path, "w", encoding="utf-8") as f:
-                f.write(current_css)
+                f.write(config.SETTINGS.get("custom_css", DEFAULT_HSR_STYLE))
 
     def import_css(self):
         path, _ = QFileDialog.getOpenFileName(self, "Импорт темы CSS", "", "CSS Files (*.css)")
         if path:
             with open(path, "r", encoding="utf-8") as f:
-                new_css = f.read()
-            config.update_settings({"custom_css": new_css})
+                config.update_settings({"custom_css": f.read()})
             self.main_win.apply_theme()
 
     def reset_css(self):

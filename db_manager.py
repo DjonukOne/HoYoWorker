@@ -61,5 +61,7 @@ def load_promos(): return load_data('promos')
 def save_settings(data): save_data('settings', data)
 def load_settings(): return load_data('settings')
 
-# Для миграции со старой версии
+def save_games(data): save_data('games', data)
+def load_games(): return load_data('games')
+
 def load_old_cookies(): return load_data('cookies')
