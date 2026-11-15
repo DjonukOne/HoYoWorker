@@ -52,8 +52,8 @@ def load_data(key):
             return {}
     return {}
 
-def save_cookies(data): save_data('cookies', data)
-def load_cookies(): return load_data('cookies')
+def save_accounts(data): save_data('accounts', data)
+def load_accounts(): return load_data('accounts')
 
 def save_promos(data): save_data('promos', data)
 def load_promos(): return load_data('promos')
@@ -61,9 +61,5 @@ def load_promos(): return load_data('promos')
 def save_settings(data): save_data('settings', data)
 def load_settings(): return load_data('settings')
 
-def clear_cookies():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM secure_storage WHERE key='cookies'")
-    conn.commit()
-    conn.close()
+# Для миграции со старой версии
+def load_old_cookies(): return load_data('cookies')

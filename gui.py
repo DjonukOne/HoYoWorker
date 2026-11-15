@@ -1,167 +1,40 @@
-import sys
-import os
 import time
 import threading
-from PyQt6.QtWidgets import (QMainWindow, QPushButton, QVBoxLayout, QWidget, 
-                             QLabel, QSystemTrayIcon, QMenu, QTimeEdit, QApplication, QTextEdit, QHBoxLayout, QGridLayout)
-from PyQt6.QtGui import QIcon, QAction, QDesktopServices
-from PyQt6.QtCore import Qt, QUrl, QTimer, pyqtSignal, QTime
-from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage
+from PyQt6.QtWidgets import QMainWindow, QWidget, QSystemTrayIcon, QMenu, QApplication, QTabWidget
+from PyQt6.QtGui import QIcon, QAction
+from PyQt6.QtCore import QTimer
 
 import config
+from styles import ICON_PATH, DEFAULT_HSR_STYLE
 from hoyo_api import HoYoWorker
-
-def resource_path(relative_path):
-    try:
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
-
-ICON_PATH = resource_path("icon.png")
-
-HSR_STYLE = """
-QMainWindow { background-color: #121212; }
-QLabel { color: #ececec; font-family: "Segoe UI", sans-serif; font-size: 13px; }
-QPushButton {
-    background-color: #2b2b2b; color: #d4af37; border: 1px solid #d4af37;
-    padding: 8px; border-radius: 4px; font-weight: bold; font-size: 13px;
-}
-QPushButton:hover { background-color: #d4af37; color: #121212; }
-QPushButton:pressed { background-color: #aa8c2c; }
-QTextEdit {
-    background-color: #1e1e1e; color: #cccccc; border: 1px solid #444444;
-    border-radius: 4px; font-family: "Consolas", monospace; font-size: 12px;
-}
-QTimeEdit {
-    background-color: #1e1e1e; color: #d4af37; border: 1px solid #d4af37;
-    padding: 4px; border-radius: 4px; width: 60px;
-}
-"""
-
-class CustomWebPage(QWebEnginePage):
-    def acceptNavigationRequest(self, url, _type, isMainFrame):
-        if url.scheme() in ['http', 'https', 'data', 'qrc', 'file']:
-            return super().acceptNavigationRequest(url, _type, isMainFrame)
-        QDesktopServices.openUrl(url)
-        return False 
-
-class PopupWindow(QMainWindow):
-    def __init__(self, profile):
-        super().__init__()
-        self.setWindowTitle("Авторизация OAuth")
-        self.resize(500, 600)
-        self.browser = QWebEngineView()
-        self.browser.setPage(CustomWebPage(profile, self.browser))
-        self.setCentralWidget(self.browser)
-
-class CustomBrowser(QWebEngineView):
-    def __init__(self, profile):
-        super().__init__()
-        self.setPage(CustomWebPage(profile, self))
-
-    def createWindow(self, _type):
-        self.popup = PopupWindow(self.page().profile())
-        self.popup.show()
-        return self.popup.browser
-
-class LoginWindow(QMainWindow):
-    cookies_ready = pyqtSignal()
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Авторизация HoYoLAB")
-        self.resize(800, 600)
-        
-        self.profile = QWebEngineProfile.defaultProfile()
-        self.browser = CustomBrowser(self.profile)
-        self.setCentralWidget(self.browser)
-        
-        self.cookie_store = self.profile.cookieStore()
-        self.cookie_store.cookieAdded.connect(self.on_cookie_added)
-        self.cookie_store.deleteAllCookies()
-        self.browser.setUrl(QUrl("https://www.hoyolab.com"))
-        self.auth_done = False
-
-    def on_cookie_added(self, cookie):
-        name = cookie.name().data().decode('utf-8')
-        value = cookie.value().data().decode('utf-8')
-        target_cookies = ["ltuid_v2", "ltoken_v2", "account_id_v2", "cookie_token_v2", "account_mid_v2"]
-        if name in target_cookies:
-            config.update_cookies({name: value})
-            if not self.auth_done:
-                if all(k in config.COOKIES for k in ["ltuid_v2", "ltoken_v2", "cookie_token_v2", "account_id_v2"]):
-                    self.auth_done = True
-                    self.cookies_ready.emit() 
+from browser_auth import LoginWindow
+from tab_account import AccountTab
+from tab_settings import SettingsTab
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("HoYoWorker")
-        self.resize(500, 560) 
+        self.resize(680, 620)
+        self.setMinimumWidth(650)
         self.setWindowIcon(QIcon(ICON_PATH))
-        self.setStyleSheet(HSR_STYLE)
+        self.apply_theme()
 
-        layout = QVBoxLayout()
-        layout.setSpacing(10)
-        
-        self.status_label = QLabel("Статус: 🔴 Не авторизован")
-        self.status_label.setStyleSheet("font-size: 14px; font-weight: bold;")
-        layout.addWidget(self.status_label)
+        self.worker = HoYoWorker()
+        self.worker.log_signal.connect(self.route_log)
+        self.worker.accounts_signal.connect(self.route_accounts_ui)
+        self.worker.need_relogin_signal.connect(self.on_need_relogin)
+        self.worker.notify_signal.connect(self.show_notification)
 
-        self.accounts_label = QLabel("Нет привязанных аккаунтов.")
-        self.accounts_label.setStyleSheet("color: #a0a0a0; margin-bottom: 5px;")
-        layout.addWidget(self.accounts_label)
+        self.account_widgets = {}
+        self.login_windows = {}
+        self.marquee_step = 0
 
-        self.btn_auth = QPushButton("Войти в HoYoLAB")
-        self.btn_auth.clicked.connect(self.handle_auth_button)
-        layout.addWidget(self.btn_auth)
-        
-        btns_layout = QGridLayout()
-        self.btn_daily = QPushButton("Собрать отметки")
-        self.btn_daily.setMinimumHeight(66) 
-        self.btn_daily.clicked.connect(self.run_manual_daily)
-        btns_layout.addWidget(self.btn_daily, 0, 0, 2, 1) 
-        
-        self.btn_collect_promo = QPushButton("Спарсить промокоды")
-        self.btn_collect_promo.clicked.connect(self.run_collect_promo)
-        btns_layout.addWidget(self.btn_collect_promo, 0, 1)
-        
-        self.btn_redeem_promo = QPushButton("Ввести промокоды")
-        self.btn_redeem_promo.clicked.connect(self.run_redeem_promo)
-        btns_layout.addWidget(self.btn_redeem_promo, 1, 1)
-        
-        layout.addLayout(btns_layout)
+        self.tabs = QTabWidget()
+        self.tabs.tabBarClicked.connect(self.on_tab_clicked)
+        self.setCentralWidget(self.tabs)
 
-        timers_layout = QGridLayout()
-        timers_layout.addWidget(QLabel("Ежедневные отметки в:"), 0, 0)
-        self.time_daily = QTimeEdit()
-        self.time_daily.setDisplayFormat("HH:mm")
-        
-        t_daily = config.SETTINGS.get("time_daily", "08:00")
-        self.time_daily.setTime(QTime.fromString(t_daily, "HH:mm")) 
-        self.time_daily.timeChanged.connect(self.save_timers) 
-        timers_layout.addWidget(self.time_daily, 0, 1)
-
-        timers_layout.addWidget(QLabel("Проверка промокодов в:"), 0, 2)
-        self.time_promo = QTimeEdit()
-        self.time_promo.setDisplayFormat("HH:mm")
-        
-        t_promo = config.SETTINGS.get("time_promo", "12:00")
-        self.time_promo.setTime(QTime.fromString(t_promo, "HH:mm")) 
-        self.time_promo.timeChanged.connect(self.save_timers) 
-        timers_layout.addWidget(self.time_promo, 0, 3)
-        
-        layout.addLayout(timers_layout)
-
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setHtml("<b>Готов к работе.</b>")
-        layout.addWidget(self.log_text)
-
-        central_widget = QWidget()
-        central_widget.setLayout(layout)
-        self.setCentralWidget(central_widget)
+        self.build_tabs()
 
         self.tray_icon = QSystemTrayIcon(self)
         self.tray_icon.setIcon(QIcon(ICON_PATH))
@@ -176,98 +49,130 @@ class MainWindow(QMainWindow):
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.show()
 
-        self.worker = HoYoWorker()
-        self.worker.log_signal.connect(self.update_log)
-        self.worker.accounts_signal.connect(self.update_accounts_ui)
+        self.schedule_timer = QTimer(self)
+        self.schedule_timer.timeout.connect(self.check_schedule)
+        self.schedule_timer.start(1000)
 
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.check_schedule)
-        self.timer.start(1000)
-        
+        self.marquee_timer = QTimer(self)
+        self.marquee_timer.timeout.connect(self.tick_marquee)
+        self.marquee_timer.start(250)
+
         self.daily_ran_at = None
         self.promo_ran_at = None
 
-        self.refresh_auth_ui()
+    def apply_theme(self):
+        css = config.SETTINGS.get("custom_css", DEFAULT_HSR_STYLE)
+        self.setStyleSheet(css)
 
-    def save_timers(self):
-        config.update_settings({
-            "time_daily": self.time_daily.time().toString("HH:mm"),
-            "time_promo": self.time_promo.time().toString("HH:mm")
-        })
+    def build_tabs(self):
+        self.tabs.blockSignals(True)
+        self.tabs.clear()
+        self.account_widgets.clear()
 
-    def refresh_auth_ui(self):
-        if config.COOKIES:
-            self.status_label.setText("Статус: 🟢 Авторизован")
-            self.btn_auth.setText("Выйти из аккаунта")
-            self.btn_auth.setStyleSheet("color: #ff5555; border-color: #ff5555;")
-            self.accounts_label.setText("Загрузка персонажей...")
-            threading.Thread(target=self.worker.fetch_accounts_info, daemon=True).start()
-        else:
-            self.status_label.setText("Статус: 🔴 Не авторизован")
-            self.btn_auth.setText("Войти через HoYoLAB")
-            self.btn_auth.setStyleSheet("") 
-            self.accounts_label.setText("Войдите, чтобы увидеть список игр.")
+        self.settings_tab = SettingsTab(self)
+        self.tabs.addTab(self.settings_tab, "⚙ Настройки")
 
-    def update_accounts_ui(self, accounts):
-        if not accounts:
-            self.accounts_label.setText("Персонажи не найдены.")
-            return
-            
-        html = "<table width='100%' cellpadding='1' cellspacing='0'>"
-        for acc in accounts:
-            html += f"<tr><td width='20%'>• {acc['game']}</td><td width='40%'>UID: {acc['uid']}</td><td><span style='color:#d4af37'>{acc['nickname']}</span> (Ур. {acc['level']})</td></tr>"
-        html += "</table>"
-        self.accounts_label.setText(html)
+        for acc_id in config.ACCOUNTS.keys():
+            w = AccountTab(acc_id, self)
+            self.account_widgets[acc_id] = w
+            self.tabs.addTab(w, "")
 
-    def handle_auth_button(self):
-        if config.COOKIES:
-            config.clear_cookies()
-            self.refresh_auth_ui()
-            self.update_log("Выполнен выход из аккаунта.")
-        else:
-            self.login_window = LoginWindow()
-            self.login_window.cookies_ready.connect(self.on_cookies_ready)
-            self.login_window.show()
+        self.plus_dummy = QWidget()
+        self.tabs.addTab(self.plus_dummy, " + ")
 
-    def on_cookies_ready(self):
-        self.update_log("<span style='color:#55ff55;'>✅ Авторизация успешна!</span>")
-        self.login_window.close()
-        self.refresh_auth_ui()
+        self.update_tab_titles()
+        if len(config.ACCOUNTS) > 0:
+            self.tabs.setCurrentIndex(1)
+        self.tabs.blockSignals(False)
 
-    def run_manual_daily(self):
-        if not config.COOKIES:
-            self.update_log("Сначала авторизуйтесь!")
-            return
-        threading.Thread(target=self.worker.run_daily, daemon=True).start()
+    def on_tab_clicked(self, index):
+        if index == self.tabs.count() - 1:
+            new_acc_id = config.create_account()
+            w = AccountTab(new_acc_id, self)
+            self.account_widgets[new_acc_id] = w
+            self.tabs.insertTab(self.tabs.count() - 1, w, "")
+            self.settings_tab.rebuild_accounts_grid()
+            self.update_tab_titles()
+            QTimer.singleShot(10, lambda: self.tabs.setCurrentIndex(self.tabs.count() - 2))
 
-    def run_collect_promo(self):
-        threading.Thread(target=self.worker.run_collect_promos, daemon=True).start()
-        
-    def run_redeem_promo(self):
-        if not config.COOKIES:
-            self.update_log("Сначала авторизуйтесь!")
-            return
-        threading.Thread(target=self.worker.run_redeem_promos, daemon=True).start()
-        
-    def run_auto_promo(self):
-        threading.Thread(target=self.worker.run_auto_promos, daemon=True).start()
+    def remove_account_tab(self, acc_id):
+        if config.delete_account(acc_id):
+            self.build_tabs()
+            self.tabs.setCurrentIndex(0)
 
-    def update_log(self, text):
-        current_time = time.strftime("%H:%M:%S")
-        self.log_text.append(f"<span style='color: #777777;'>[{current_time}]</span> {text}")
+    def tick_marquee(self):
+        self.marquee_step += 1
+        self.update_tab_titles()
+
+    def update_tab_titles(self):
+        MAX_LEN = 12
+        for i, acc_id in enumerate(config.ACCOUNTS.keys(), start=1):
+            raw_name = config.ACCOUNTS[acc_id].get("name", acc_id)
+            if len(raw_name) <= MAX_LEN:
+                display_name = raw_name.ljust(MAX_LEN)
+            else:
+                padded = raw_name + "   •   "
+                double_padded = padded + padded
+                offset = self.marquee_step % len(padded)
+                display_name = double_padded[offset : offset + MAX_LEN]
+            self.tabs.setTabText(i, display_name)
+
+    def open_login_window(self, acc_id, resume_promo_after=False):
+        win = LoginWindow(acc_id, resume_promo_after=resume_promo_after)
+        win.cookies_ready.connect(self.on_cookies_ready)
+        self.login_windows[acc_id] = win
+        win.show()
+        win.activateWindow()
+
+    def on_cookies_ready(self, acc_id, resume_promo_after):
+        if acc_id in self.login_windows:
+            self.login_windows[acc_id].close()
+        if acc_id in self.account_widgets:
+            self.account_widgets[acc_id].append_log("<span style='color:#55ff55;'>✅ Свежие куки успешно получены!</span>")
+            self.account_widgets[acc_id].refresh_auth_ui()
+        if resume_promo_after:
+            threading.Thread(target=self.worker.run_redeem_promos, args=(acc_id,), daemon=True).start()
+
+    def on_need_relogin(self, acc_id):
+        self.open_login_window(acc_id, resume_promo_after=True)
+
+    def route_log(self, target_acc_id, text):
+        if target_acc_id == "ALL":
+            for w in self.account_widgets.values():
+                w.append_log(text)
+        elif target_acc_id in self.account_widgets:
+            self.account_widgets[target_acc_id].append_log(text)
+
+    def route_accounts_ui(self, acc_id, accounts):
+        if acc_id in self.account_widgets:
+            self.account_widgets[acc_id].update_accounts_ui(accounts)
+
+    def show_notification(self, title, msg):
+        self.tray_icon.showMessage(title, msg, QSystemTrayIcon.MessageIcon.Information, 3500)
 
     def check_schedule(self):
         current_time = time.strftime("%H:%M")
-        t_daily = self.time_daily.time().toString("HH:mm")
-        t_promo = self.time_promo.time().toString("HH:mm")
-        
+        t_daily = config.SETTINGS.get("time_daily", "08:00")
+        t_promo = config.SETTINGS.get("time_promo", "12:00")
+
         if current_time == t_daily and self.daily_ran_at != current_time:
-            self.daily_ran_at = current_time 
-            self.run_manual_daily()
-            
+            self.daily_ran_at = current_time
+            for acc_id, data in config.ACCOUNTS.items():
+                if data.get("auto_daily", True) and data.get("cookies"):
+                    threading.Thread(target=self.worker.run_daily, args=(acc_id,), daemon=True).start()
+
         if current_time == t_promo and self.promo_ran_at != current_time:
-            self.promo_ran_at = current_time 
-            self.run_auto_promo() 
+            self.promo_ran_at = current_time
+            threading.Thread(target=self.run_scheduled_promos_flow, daemon=True).start()
+
+    def run_scheduled_promos_flow(self):
+        self.worker.run_collect_promos("ALL")
+        for acc_id, data in config.ACCOUNTS.items():
+            if data.get("auto_promo", True) and data.get("cookies"):
+                if config.SETTINGS.get("force_relogin_before_promo", True):
+                    self.worker.need_relogin_signal.emit(acc_id)
+                else:
+                    self.worker.run_redeem_promos(acc_id)
 
     def closeEvent(self, event):
         event.ignore()
